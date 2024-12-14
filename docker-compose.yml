@@ -1,0 +1,21 @@
+version: '2.4'
+
+networks:
+  backend:
+    driver: bridge
+
+services:
+
+  web:
+    restart: always
+    image: eqemupatcherweb:latest
+    build:
+      context: ./containers/web
+    tty: true
+    command: go run main.go
+    volumes:
+      - ./:/home/go/src
+    networks:
+      - backend
+    ports:
+      - "${IP_ADDRESS}:${PORT}:4444"
