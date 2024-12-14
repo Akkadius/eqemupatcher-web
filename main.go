@@ -24,6 +24,7 @@ func main() {
 	cloneOrPull()
 
 	e := echo.New()
+	e.Use(middleware.Logger())
 
 	// Webhook endpoint to trigger the pull or clone
 	e.GET("/gh-update", func(c echo.Context) error {
