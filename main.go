@@ -58,7 +58,7 @@ func cloneOrPull() {
 	if _, err := os.Stat(cloneDir); os.IsNotExist(err) {
 		// Directory doesn't exist, clone the repository
 		fmt.Println("Directory does not exist. Cloning repository...")
-		cmd := exec.Command("git", "clone", os.Getenv("REPO_URL"), "eqemupatcher")
+		cmd := exec.Command("git", "clone", os.Getenv("REPO_URL"), cloneDir)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		fmt.Println("Cloning repository...")
