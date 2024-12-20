@@ -27,7 +27,7 @@ func main() {
 	e.Use(middleware.Logger())
 
 	// Webhook endpoint to trigger the pull or clone
-	e.GET("/gh-update", func(c echo.Context) error {
+	e.POST("/gh-update", func(c echo.Context) error {
 		// Retrieve the secret key from the query string
 		queryKey := c.QueryParam("key")
 		expectedKey := os.Getenv("WEBHOOK_KEY")
