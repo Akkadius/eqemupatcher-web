@@ -6,19 +6,69 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"golang.org/x/time/rate"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
+// This entire file was extremely quickly thrown together
+// TODO for me (Akkadius) to restructure this into a formal app at a later time
+
 const cloneDir = "eqemupatcher" // Directory to clone the repository to
 const tempZipDir = "/tmp/patcher"
+
+var (
+	chunkStore   = make(map[string][]string) // chunkID -> file list
+	chunkStoreMu sync.Mutex
+)
+
+var (
+	visitors   = make(map[string]*rate.Limiter)
+	visitorsMu sync.Mutex
+)
+
+func getVisitor(ip string) *rate.Limiter {
+	visitorsMu.Lock()
+	defer visitorsMu.Unlock()
+
+	limiter, exists := visitors[ip]
+	if !exists {
+		limiter = rate.NewLimiter(rate.Every(time.Minute/10), 10) // 10 requests/minute
+		visitors[ip] = limiter
+	}
+	return limiter
+}
+
+func getClientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+func rateLimitMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		ip := getClientIP(c.Request())
+		limiter := getVisitor(ip)
+
+		if !limiter.Allow() {
+			return c.JSON(http.StatusTooManyRequests, echo.Map{
+				"error": "Rate limit exceeded. Max 10 requests per minute.",
+			})
+		}
+		return next(c)
+	}
+}
 
 func main() {
 	// load .env
@@ -49,11 +99,6 @@ func main() {
 
 		return c.JSON(http.StatusOK, echo.Map{"message": "Update triggered."})
 	})
-
-	var (
-		chunkStore   = make(map[string][]string) // chunkID -> file list
-		chunkStoreMu sync.Mutex
-	)
 
 	// POST /zip-chunks/init
 	e.POST("/zip-chunks/init", func(c echo.Context) error {
@@ -132,7 +177,7 @@ func main() {
 		return c.JSON(http.StatusOK, echo.Map{
 			"chunks": result,
 		})
-	})
+	}, rateLimitMiddleware)
 
 	// GET /zip-chunks/:chunkID
 	e.GET("/zip-chunks/:chunkID", func(c echo.Context) error {
@@ -193,6 +238,57 @@ func main() {
 			},
 		})
 	})
+
+	// expire old entries
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			now := time.Now()
+			maxAge := 1 * time.Minute
+
+			chunkStoreMu.Lock()
+			for chunkKey := range chunkStore {
+				// Extract the timestamp from the prefix of the chunkKey
+				tsPart := chunkKey[:strings.Index(chunkKey, "-")]
+				tsInt, err := strconv.ParseInt(tsPart, 10, 64)
+				if err != nil {
+					continue // skip invalid entries
+				}
+
+				chunkTime := time.Unix(0, tsInt) // ns to time.Time
+				if now.Sub(chunkTime) > maxAge {
+					fmt.Printf("Auto-cleaning expired chunk: %s\n", chunkKey)
+					delete(chunkStore, chunkKey)
+
+					// Delete zip file if it exists
+					matches, _ := filepath.Glob(filepath.Join(tempZipDir, chunkKey+"-*.zip"))
+					for _, path := range matches {
+						_ = os.Remove(path)
+					}
+				}
+			}
+			chunkStoreMu.Unlock()
+
+			tmpDir := filepath.Join(os.TempDir(), "patcher")
+			err := filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if !info.IsDir() && filepath.Ext(path) == ".zip" {
+					if now.Sub(info.ModTime()) > maxAge {
+						fmt.Printf("Cleaning up old temp file: %s\n", path)
+						os.Remove(path)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				fmt.Printf("Error during temp file cleanup: %v\n", err)
+			}
+		}
+	}()
 
 	// Serve the static files
 	e.Use(middleware.StaticWithConfig(middleware.StaticConfig{
